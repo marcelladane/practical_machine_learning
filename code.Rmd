@@ -1,0 +1,184 @@
+---
+title: "code.Rmd"
+author: "Marcelladane"
+date: "13 September 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, fig.width=10, fig.height=5)
+options(width=120)
+
+library(lattice)
+library(ggplot2)
+library(plyr)
+library(randomForest)
+```
+
+##Project Summary
+
+Based on the data from http://groupware.les.inf.puc-rio.br/har we will try to create a model to predict what exercise was performed. To do so, we have a database of 159 features.
+
+*Steps to achieve our goal:*
+
+- Process and explore the data
+- Model selection (try to find a model to answer our question)
+- Model examination (using the test set to check how good is the model)
+- Conclusions
+
+## Processing and Exploring
+Load the data
+```{r cache=TRUE}
+Training <- read.csv("pml-training.csv")
+Test <- read.csv("pml-testing.csv")
+```
+
+Explore the features of the data
+```{r}
+dim(Training)
+
+head(Training)
+
+str(Training)
+
+```
+
+As we can notice, we have too many NAs, one option is to remove most of them from table. I randomly decided for keep just 1/4 of them. 
+
+```{r}
+maxNAPerc = 25
+maxNACount <- nrow(Training) / 100 * maxNAPerc
+removeColumns <- which(colSums(is.na(Training) | Training=="") > maxNACount)
+Training_noNA <- Training[,-removeColumns]
+Test_noNA <- Test[,-removeColumns]
+```
+
+Then convert all factors to integers
+```{r}
+classeLevels <- levels(Training_noNA$classe)
+Training_noNA1 <- data.frame(data.matrix(Training_noNA))
+Training_noNA1$classe <- factor(Training_noNA1$classe, labels=classeLevels)
+Test_noNA1 <- data.frame(data.matrix(Test_noNA))
+
+training.final <- Training_noNA1
+testing.final <- Test_noNA1
+```
+
+Here I will gonna need to do a partition on the training set, it will not be used, but my computer can't handle all the data, so I will subset it to facilitate the analysis (I actually tried to run it a couple of times and it requires way more RAM memory than I have). 
+```{r}
+set.seed(1982)
+library(caret)
+
+classeIndex <- which(names(Training_noNA1) == "classe")
+
+partition <- createDataPartition(y=Training_noNA1$classe, p=0.75, list=FALSE)
+training.subseted <- Training_noNA1[partition, ]
+training.excluded <- Training_noNA1[-partition, ]
+```
+
+To check possible correlations, lets first check possible existence of correlations and then plot linear predictors
+
+```{r}
+correlations <- cor(training.subseted[, -classeIndex], as.numeric(training.subseted$classe))
+bestCorrelations <- subset(as.data.frame(as.table(correlations)), abs(Freq)>0.2)
+bestCorrelations
+```
+
+```{r}
+library(Rmisc)
+library(ggplot2)
+
+A <- ggplot(training.subseted, aes(classe,pitch_forearm)) + geom_boxplot(aes(fill=classe))
+
+B <- ggplot(training.subseted, aes(classe,magnet_arm_x)) + geom_boxplot(aes(fill=classe))
+
+C <- ggplot(training.subseted, aes(classe,magnet_arm_y)) + geom_boxplot(aes(fill=classe))
+
+multiplot(A, B, C, cols=3)
+```
+
+I started by trying abs(Freq) of 0.4 and kept decreasing the value until get some results. Therefore, we can assume, that using this simple linear predictors, will be hard to differenciate between classes.
+
+##Model selection 
+
+The first step can be to check which variables are highly correlated between themselves, then check how the model behaves if we exclude them. 
+
+Now let's exclude the highly correlated variables
+```{r}
+library(corrplot)
+correlationMatrix <- cor(training.subseted[, -classeIndex])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.8, exact=TRUE)
+To_exclude <- c(highlyCorrelated, classeIndex)
+corrplot(correlationMatrix, method="color", type="lower", order="hclust", tl.cex=0.6, tl.col="black")
+```
+
+And now use Random Forest training. For this project I will use 30 trees.And 2 models, one with all data and one without the high correlated variables.
+
+```{r cache=TRUE}
+library(randomForest)
+
+ntree <- 30 
+
+Model.cleaned <- randomForest(
+  x=training.subseted[, -classeIndex], 
+  y=training.subseted$classe,
+  xtest=testing.final[, -classeIndex], 
+  ytest=testing.final$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+
+Model.exclude <- randomForest(
+  x=training.subseted[, -To_exclude], 
+  y=training.subseted$classe,
+  xtest=testing.final[, -To_exclude], 
+  ytest=testing.final$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) 
+
+```
+
+##Model examination
+
+Now lets see the accuracy of the models and choose the best one
+```{r}
+Model.cleaned
+Accuracy.Mcleaned.training <- round(1-sum(Model.cleaned$confusion[, 'class.error']),3)
+paste0("Training (M.cleaned): ",Accuracy.Mcleaned.training)
+Accuracy.Mcleaned.test  <- round(1-sum(Model.cleaned$test$confusion[, 'class.error']),3)
+paste0("Test (M.cleaned):",Accuracy.Mcleaned.test)
+
+Model.exclude
+Accuracy.Mexcluded.training <- round(1-sum(Model.exclude$confusion[, 'class.error']),3)
+paste0("Training (M.excluded):",Accuracy.Mexcluded.training)
+Accuracy.Mexcluded.test <- round(1-sum(Model.exclude$test$confusion[, 'class.error']),3)
+paste0("Test (M.excluded)",Accuracy.Mexcluded.test)
+```
+
+And finally lets plot the main variables influenciating the models
+
+```{r}
+par(mfrow=c(2,2)) 
+varImpPlot(Model.cleaned, cex=0.4, pch=16, main='Model.cleaned (variables)')
+varImpPlot(Model.exclude, cex=0.4, pch=16, main='Model.exclude (variables)')
+plot(Model.cleaned, cex=0.2, main='Error x trees (M.cleaned)')
+plot(Model.exclude, cex=0.2, main='Error x trees (M.excluded)')
+```
+
+##Conclusions
+As you can notice, both methods had a great accuracy in the test data. 
+But the cleaned method was better also in the training data. 
+The OOB values also do not differ between models. Therefore, I would say that for this data set both models are equaly good, been the *Model.cleaned* a bit better when comparing both sets of data.
+When comparing Errors x Numbers of trees it gets quite clear, the best way to create a model is to do not exclude data, there you can see that the excluded variables increased a lot the error rate in the first 10 trees.
+Now, the last step is therefore, to run the model in the validation set (the subset extracted from the training set in the beginning)
+
+Run one last time with the test set (the best would be to have a validation set), I will decrease the number of trees to 15, since we saw was enough.
+```{r}
+predictions <- t(cbind(
+    Exclude=as.data.frame(predict(Model.exclude, testing.final[, -To_exclude]), optional=TRUE),
+    Cleaned=as.data.frame(predict(Model.cleaned, testing.final), optional=TRUE)
+))
+predictions
+```
+
